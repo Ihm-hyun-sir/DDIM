@@ -29,3 +29,4 @@ ckpt step is the checkpoint saving time, we use 200000 for default setting.
   year={2024}
 }
 ```
+# DDIM
