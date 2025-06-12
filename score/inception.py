@@ -10,7 +10,7 @@ except ImportError:
 
 # Inception weights ported to Pytorch from
 # http://download.tensorflow.org/models/image/imagenet/inception-2015-12-05.tgz
-FID_WEIGHTS_URL = '/remote-home/tianjiaozhang/LT_diffusion/yiming_baseline/CBDM-pytorch-main/pt_inception-2015-12-05-6726825d.pth'
+FID_WEIGHTS_URL = 'https://github.com/mseitzer/pytorch-fid/releases/download/fid_weights/pt_inception-2015-12-05-6726825d.pth'
 
 
 class InceptionV3(nn.Module):
@@ -199,7 +199,7 @@ def fid_inception_v3():
     inception.Mixed_7b = FIDInceptionE_1(1280)
     inception.Mixed_7c = FIDInceptionE_2(2048)
 
-    state_dict = torch.load(FID_WEIGHTS_URL)
+    state_dict = load_state_dict_from_url(FID_WEIGHTS_URL, progress=True)
     inception.load_state_dict(state_dict)
     return inception
 

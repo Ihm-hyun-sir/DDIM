@@ -1,0 +1,28 @@
+# 예시: 64×64 ImageNet (무라운드 5.6 M 이미지) unconditional
+--T 1000 \
+--attn 16 \
+--batch_size 64 \
+--beta_1 0.0001 \
+--beta_T 0.02 \
+--ch 192 \
+--ch_mult 1 --ch_mult 1 --ch_mult 2 --ch_mult 2 --ch_mult 4 --ch_mult 4 \
+--dropout 0.1 \
+--ema_decay 0.9999 \
+--noeval \
+--eval_step 0 \
+--fid_cache ./stats/imagenet64.train.npz \
+--grad_clip 1.0 \
+--img_size 64 \
+--logdir ./logs/DDPM_IMAGENET64_EPS \
+--lr 0.0001 \
+--num_images 1281167 \
+--num_res_blocks 3 \
+--num_workers 8 \
+--noparallel \
+--sample_size 64 \
+--sample_step 1000 \
+--save_step 5000 \
+--total_steps 1600001 \
+--train \
+--var_type fixedlarge \
+--warmup 5000

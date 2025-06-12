@@ -18,13 +18,14 @@ try:
     from tensorboardX import SummaryWriter
 except Exception as err:
     pass
-from diffusion import GaussianDiffusionTrainer, GaussianDiffusionSampler
+from diffusion import *
 from model.model import UNet
 from model.classifier import HalveUNetClassifier
 from utils.augmentation import *
 from dataset import ImbalanceCIFAR100, ImbalanceCIFAR10
 from score.both import get_inception_and_fid_score
 from utils.augmentation import KarrasAugmentationPipeline
+from score.fid import get_fid_score
 
 os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 
@@ -73,7 +74,7 @@ flags.DEFINE_bool('cfg', False, help='whether to train unconditional generation 
 flags.DEFINE_string('data_type', 'cifar100', help='data type, must be in [cifar10, cifar100, cifar10lt, cifar100lt,imagenet200lt,imgnetLT]')
 
 flags.DEFINE_float('imb_factor', 0.01, help='imb_factor for long tail dataset')
-flags.DEFINE_float('num_class', 0, help='number of class of the pretrained model')
+flags.DEFINE_integer('num_class', 0, help='number of class of the pretrained model')
 flags.DEFINE_float('omega', 1.5, help='number of class of the pretrained model')
 # Logging & Sampling
 flags.DEFINE_string('logdir', './logs/', help='log directory')
@@ -86,26 +87,25 @@ flags.DEFINE_integer('save_step', 100000, help='frequency of saving checkpoints,
 flags.DEFINE_integer('eval_step', 0, help='frequency of evaluating model, 0 to disable during training')
 flags.DEFINE_integer('num_images', 50000, help='the number of generated images for evaluation')
 flags.DEFINE_integer('private_num_images', 0, help='the number of private images for evaluation')
-flags.DEFINE_bool('fid_use_torch', False, help='calculate IS and FID on gpu')
+flags.DEFINE_bool('fid_use_torch', True, help='calculate IS and FID on gpu')
 flags.DEFINE_string('fid_cache', './stats/cifar10.train.npz', help='FID cache')
 flags.DEFINE_string('sample_name', 'saved', help='name for a set of samples to be saved or to be evaluated')
 flags.DEFINE_bool('sampled', False, help='evaluate sampled images')
-flags.DEFINE_string('sample_method', 'cfg', help='sampling method, must be in [cfg, cond, uncond]')
+##
+flags.DEFINE_bool('finetune', False, help='finetuned based on a pretrained model')
+flags.DEFINE_string('finetuned_logdir', '', help='logdir for the new model, where FLAGS.logdir will be the folder for \
+                     the pretrained model')
+flags.DEFINE_string('sampler_method', 'ddpm', help='sampler_method, must be in [ddpm,ddim]')
+flags.DEFINE_integer('ddim_skip_step',20,help="ddim step")
+flags.DEFINE_integer('ckpt_step',10,help="ckpt file")
+flags.DEFINE_bool('improved_prd', True, help='evaluate improved precision and recall, only evaluated with 50k samples')
+flags.DEFINE_bool('prd', True, help='evaluate precision and recall (F_beta), only evaluated with 50k samples')
+flags.DEFINE_string('root', './data', help='path of dataset')
+flags.DEFINE_integer('specific_class',-1,'Evaluate only this class index (0-based).')
 
-# CBDM hyperparameter
-flags.DEFINE_bool('transfer_x0',False,help='transfering x0 to other index based on L2 norm')
-flags.DEFINE_bool('transfer_tr_tau',False,help='transfering x0 with adjusted tau')
-flags.DEFINE_bool('transfer_mixing',False,help='whether to using transfer')
-flags.DEFINE_bool('bal_sample',False,help='whether to using transfer')
-
-
-flags.DEFINE_string('transfer_mode', 'full', help='transfer_mode')
-flags.DEFINE_float('tr_tau', 1.0, help='weight for transfer power')
-
-
-
-
-flags.DEFINE_float('w', 2.0, help='w')
+flags.DEFINE_string('sample_method', 'cfg', help='sampling method, must be in [cfg, cond, uncond]') #의미 없음 flagfile 맞추기용
+flags.DEFINE_float('tau', 1.0, help='weight for the class-balancing(adjustment) loss') #의미 없음 flagfile 맞추기용
+##
 device = torch.device('cuda:0')
 
 
@@ -132,53 +132,51 @@ def warmup_lr(step):
     return min(step, FLAGS.warmup) / FLAGS.warmup
 
 
-def evaluate(sampler, model, sampled):
-    if not sampled:
-        model.eval()
-        with torch.no_grad():
-            images = []
-            labels = []
-            desc = 'generating images'
-            for i in trange(0, FLAGS.num_images, FLAGS.batch_size, desc=desc):
-                batch_size = min(FLAGS.batch_size, FLAGS.num_images - i)
-                x_T = torch.randn((batch_size, 3, FLAGS.img_size, FLAGS.img_size))
-                batch_images, batch_labels = sampler(x_T.to(device),
-                                                     omega=FLAGS.omega,
-                                                     method=FLAGS.sample_method)
-                images.append((batch_images.cpu() + 1) / 2)
-                if FLAGS.sample_method!='uncond' and batch_labels is not None:
-                    labels.append(batch_labels.cpu())
-            images = torch.cat(images, dim=0).numpy()
-        np.save(os.path.join(FLAGS.logdir, '{}_{}_samples_ema_{}.npy'.format(
-                                            FLAGS.sample_method, FLAGS.omega,
-                                            FLAGS.sample_name)), images)
-        if FLAGS.sample_method != 'uncond':
-            labels = torch.cat(labels, dim=0).numpy()
-            np.save(os.path.join(FLAGS.logdir, '{}_{}_labels_ema_{}.npy'.format(
-                                            FLAGS.sample_method, FLAGS.omega,
-                                            FLAGS.sample_name)), labels)
-        model.train()
-    else:
-        labels = None
-        images = np.load(os.path.join(FLAGS.logdir, '{}_{}_samples_ema_{}.npy'.format(
-                                            FLAGS.sample_method, FLAGS.omega,
-                                            FLAGS.sample_name)))
+def evaluate(sampler, model,save=True,use_eval=True,save_intermediate=False):
+    #model.eval()
+    print("Evalutate")
+    with torch.no_grad():
+        images = [];labels = [];intermediate_images=[]
+        desc = "generating images"
+        for i in trange(0, FLAGS.num_images, FLAGS.batch_size, desc=desc):
+            #Each image corresponds to a random label
+            batch_size = min(FLAGS.batch_size, FLAGS.num_images - i)
+            x_T = torch.randn((batch_size, 3, FLAGS.img_size, FLAGS.img_size))  
+            #change it to corresponding label
 
-        if FLAGS.sample_method != 'uncond':
-            labels = np.load(os.path.join(FLAGS.logdir, '{}_{}_labels_ema_{}.npy'.format(
-                                                FLAGS.sample_method, FLAGS.omega,
-                                                FLAGS.sample_name)))
+            if FLAGS.specific_class > 0 :
+                y = torch.full((len(x_T),),FLAGS.specific_class).to(device)
+            else :
+                y = torch.randint(FLAGS.num_class, size=(x_T.shape[0], ),device=device)
+
+            batch_images , batch_labels = sampler(x_T.to(device),y,method=FLAGS.sampler_method,skip=FLAGS.ddim_skip_step)
+
+
+            images.append((batch_images.cpu() + 1) / 2)
+            labels.append(batch_labels.cpu())
+        images = torch.cat(images, dim=0).numpy()
+        labels = torch.cat(labels, dim=0).cpu().numpy()
+
     save_image(
         torch.tensor(images[:256]),
-        os.path.join(FLAGS.logdir, 'visual_ema_{}_{}_{}.png'.format(
-                                    FLAGS.sample_method, FLAGS.omega, FLAGS.sample_name)),
+        os.path.join(FLAGS.logdir, 'samples_ema_{}.png'.format(FLAGS.specific_class)),
         nrow=16)
+    np.save(os.path.join(FLAGS.logdir, '{}_{}_{}_samples_ema_{}.npy'.format(
+                                    FLAGS.sampler_method, FLAGS.omega, FLAGS.num_images,
+                                    FLAGS.specific_class)), images)
+    if FLAGS.conditional:
+        np.save(os.path.join(FLAGS.logdir, '{}_{}_{}_labels_ema_{}.npy'.format(
+                                FLAGS.sampler_method, FLAGS.omega, FLAGS.num_images,
+                                FLAGS.specific_class)), labels)
 
-    (IS, IS_std), FID = get_inception_and_fid_score(
-        images, FLAGS.fid_cache, num_images=FLAGS.num_images,
-        use_torch=FLAGS.fid_use_torch, FLAGS=FLAGS)
+    (IS, IS_std), FID, prd_score, im_prd = get_inception_and_fid_score(
+        images, labels, FLAGS.fid_cache, num_images=FLAGS.num_images,
+        use_torch=FLAGS.fid_use_torch, verbose=True,FLAGS=FLAGS)
+    
+    if save_intermediate:
+        return images,intermediate_images
 
-    return (IS, IS_std), FID
+    return (IS, IS_std), FID, prd_score, im_prd, images , labels
 
 
 def train():
@@ -199,7 +197,7 @@ def train():
 
     if FLAGS.data_type == 'cifar10':
         dataset = CIFAR10(
-                root='./data',
+                root=FLAGS.root,
                 # root='...',
                 train=True,
                 download=True,
@@ -207,14 +205,14 @@ def train():
                 )
     elif FLAGS.data_type == 'cifar100':
         dataset = CIFAR100(
-                root='./data',
+                root=FLAGS.root,
                 # root='...',
                 train=True,
                 download=True,
                 transform=tran_transform)
     elif FLAGS.data_type == 'cifar10lt':
         dataset = ImbalanceCIFAR10(
-                root='./data',
+                root=FLAGS.root,
                 # root='...',
                 imb_type='exp',
                 imb_factor=FLAGS.imb_factor,
@@ -227,15 +225,16 @@ def train():
                 )
     elif FLAGS.data_type == 'cifar100lt':
         dataset = ImbalanceCIFAR100(
-                root='./data',
+                root=FLAGS.root,
                 # root='...',
                 imb_type='exp',
                 imb_factor=FLAGS.imb_factor,
                 rand_number=0,
                 train=True,
+                download=True,
                 transform=tran_transform,)
     elif FLAGS.data_type == 'imagenet200lt':
-        full_dtset = ImageFolder(root='/remote-home/share/datasets/tiny-imagenet-200/train')
+        full_dtset = ImageFolder(root=FLAGS.root)
         dataset = ImbalanceDataset(full_dtset.imgs,full_dtset.targets,transform=tran_transform)
     else:
         print('Please enter a data type included in [cifar10, cifar100, cifar10lt, cifar100lt]')
@@ -257,10 +256,6 @@ def train():
         return all_classes_count / all_classes_count.sum()
     weight = class_counter(dataset.targets).unsqueeze(0)
     print(weight)
-    weight_transfer_matrix = weight.T @ weight
-    weight_power_matrix = torch.pow(weight_transfer_matrix,FLAGS.tr_tau)
-
-
 
     net_model = UNet(
         T=FLAGS.T, ch=FLAGS.ch, ch_mult=FLAGS.ch_mult, attn=FLAGS.attn,
@@ -273,13 +268,11 @@ def train():
     sched = torch.optim.lr_scheduler.LambdaLR(optim, lr_lambda=warmup_lr)
     trainer = GaussianDiffusionTrainer(
         net_model, FLAGS.beta_1, FLAGS.beta_T, FLAGS.T, dataset,
-        FLAGS.num_class, FLAGS.cfg, weight,
-        transfer_x0=FLAGS.transfer_x0,transfer_tr_tau=FLAGS.transfer_tr_tau,
-        transfer_mode=FLAGS.transfer_mode,label_weight_tr = weight_power_matrix).to(device)
-    net_sampler = GaussianDiffusionSampler(
-        net_model, FLAGS.beta_1, FLAGS.beta_T, FLAGS.T, FLAGS.num_class, FLAGS.img_size, FLAGS.var_type).to(device)
-    ema_sampler = GaussianDiffusionSampler(
-        ema_model, FLAGS.beta_1, FLAGS.beta_T, FLAGS.T, FLAGS.num_class, FLAGS.img_size, FLAGS.var_type).to(device)
+        FLAGS.num_class, FLAGS.cfg, weight).to(device)
+    net_sampler = GaussianDiffusionSamplerOld(
+            net_model, FLAGS.beta_1, FLAGS.beta_T, FLAGS.T, img_size=FLAGS.img_size, var_type=FLAGS.var_type, omega=FLAGS.omega,cond = FLAGS.conditional).to(device)
+    ema_sampler = GaussianDiffusionSamplerOld(
+            ema_model, FLAGS.beta_1, FLAGS.beta_T, FLAGS.T, img_size=FLAGS.img_size, var_type=FLAGS.var_type, omega=FLAGS.omega,cond = FLAGS.conditional).to(device)
     
     if FLAGS.resume:
         ckpt = torch.load(os.path.join(FLAGS.resume_ckpt,
@@ -343,9 +336,8 @@ def train():
 
             x_0 = x_0.to(device)
             y_0 = y_0.to(device)
-            loss_ddpm, loss_reg = trainer(x_0, y_0, augm,uncond_flag_out=uncond_flag_from_out)
+            loss_ddpm = trainer(x_0, y_0, augm)
             loss_ddpm = loss_ddpm.mean()
-            loss_reg = loss_reg.mean()
             loss =  loss_ddpm
             loss.backward()
 
@@ -357,8 +349,6 @@ def train():
 
             # logs
             writer.add_scalar('loss', loss, step)
-            writer.add_scalar('loss_ddpm', loss_ddpm, step)
-            writer.add_scalar('loss_reg', loss_reg, step)
             pbar.set_postfix(loss='%.5f' % loss)
 
             # sample
@@ -374,7 +364,7 @@ def train():
                 net_model.train()
 
             # save
-            if FLAGS.save_step > 0 and step % FLAGS.save_step == 0:
+            if FLAGS.save_step > 0 and step % FLAGS.save_step == 0 and step > 0:
                 ckpt = {
                     'net_model': net_model.state_dict(),
                     'ema_model': ema_model.state_dict(),
@@ -388,11 +378,14 @@ def train():
             # evaluate
             if FLAGS.eval_step > 0 and step % FLAGS.eval_step == 0:
                 # net_IS, net_FID, _ = evaluate(net_sampler, net_model)
-                ema_IS, ema_FID = evaluate(ema_sampler, ema_model, False)
+                ema_IS, ema_FID, prd_score, im_prd, _, _  = evaluate(ema_sampler, ema_model, False)
                 metrics = {
-                    'IS': ema_IS[0],
-                    'IS_std': ema_IS[1],
-                    'FID': ema_FID
+                    'IS': IS[0],
+                    'IS_std': IS[1],
+                    'FID': FID,
+                    'PRD': prd_score,
+                    'PRECISION': im_prd[0],
+                    'RECALL': im_prd[1]
                 }
                 print(step, metrics)
                 pbar.write(
@@ -412,45 +405,33 @@ def train():
 
 
 def eval():
-    #FLAGS.num_class = 100 if 'cifar100' in FLAGS.data_type else 10
+    # model setup
     model = UNet(
         T=FLAGS.T, ch=FLAGS.ch, ch_mult=FLAGS.ch_mult, attn=FLAGS.attn,
         num_res_blocks=FLAGS.num_res_blocks, dropout=FLAGS.dropout,
-        cond=FLAGS.conditional, augm=FLAGS.augm, num_class=int(FLAGS.num_class))
-    sampler = GaussianDiffusionSampler(
-        model, FLAGS.beta_1, FLAGS.beta_T, FLAGS.T, FLAGS.num_class, FLAGS.img_size, FLAGS.var_type).to(device)
+        cond=FLAGS.conditional, augm=FLAGS.augm, num_class=FLAGS.num_class)
+
+
+    sampler = GaussianDiffusionSamplerOld(
+                model, FLAGS.beta_1, FLAGS.beta_T, FLAGS.T, img_size=FLAGS.img_size,
+                var_type=FLAGS.var_type, omega=FLAGS.omega,cond = FLAGS.conditional).to(device)
 
     if FLAGS.parallel:
         sampler = torch.nn.DataParallel(sampler)
-    FLAGS.sample_name = '{}_N{}_STEP{}'.format(FLAGS.sample_name, FLAGS.num_images, FLAGS.ckpt_step)
-
-    # load ema model (almost always better than the model) and evaluate
-    ckpt = torch.load(os.path.join(FLAGS.logdir, 'ckpt_{}.pt'.format(FLAGS.ckpt_step)), map_location='cpu')
 
 
-    # evaluate IS/FID
-    if 'cifar100' in FLAGS.data_type:
-        FLAGS.fid_cache = './stats/cifar100.train.npz'
+
+    # load model and evaluate
+    if FLAGS.ckpt_step >= 0:
+        ckpt = torch.load(os.path.join(FLAGS.logdir, f'ckpt_{FLAGS.ckpt_step}.pt'))
     else:
-        FLAGS.fid_cache = './stats/cifar10.train.npz'
+        ckpt = torch.load(os.path.join(FLAGS.logdir, 'ckpt.pt'))
 
-    if not FLAGS.sampled:
-        model.load_state_dict(ckpt['ema_model'])
-    else:
-        model = None
+    model.load_state_dict(ckpt['net_model'])
 
-    (IS, IS_std), FID = evaluate(sampler, model, FLAGS.sampled)
-
-    print('logdir', FLAGS.logdir)
-    with open(os.path.join(FLAGS.logdir,  'res_ema_{}.txt'.format(FLAGS.sample_name)), 'a+') as f:
-        f.write('Settings: NUM:{} EPOCH:{}, OMEGA:{}, METHOD:{} \n' .format (
-            FLAGS.num_images, FLAGS.ckpt_step, FLAGS.omega, FLAGS.sample_method))
-        f.write('Model(EMA): IS:%6.5f(%.5f), FID/CIFAR100:%7.5f \n' % (IS, IS_std, FID))
-    f.close()
-
-    print('Model(EMA): IS:%6.5f(%.5f), FID/CIFAR100:%7.5f \n' % (IS, IS_std, FID))
-
-    f.close()
+    model.load_state_dict(ckpt['ema_model'])
+    (IS, IS_std), FID, prd_score, im_prd, samples, labels = evaluate(sampler, None)
+    print("Model(EMA): IS:%6.3f(%.3f), FID:%7.3f, PRD:%7.3f , PRECISION : %7.3f, RECALL : %7.3f" % (IS, IS_std, FID, prd_score[0], im_prd[0] , im_prd[1]))
 
 
 def set_annealed_lr(opt, base_lr, frac_done):
