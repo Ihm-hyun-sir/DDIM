@@ -5,6 +5,6 @@ dim
 
 EVAL
 CUDA_VISIBLE_DEVICES=1 python main.py \
-                    --flagfile ./logs/cifar100lt_ddpm/flagfile.txt     --logdir ./logs/cifar100lt_ddpm     --fid_cache ./stats/cifar100.train.npz  \
-                    --ckpt_step 200000     --num_images 50000 --batch_size 64     \
-                    --notrain     --eval     --sampler_method ddim     --omega 0.8     --conditional
+                    --flagfile ./logs/cifar100lt_cbdm/flagfile.txt     --logdir ./logs/cifar100lt_cbdm     --fid_cache ./stats/cifar100.train.npz  \
+                    --ckpt_step 300000     --num_images 50000 --batch_size 64     \
+                    --notrain     --eval     --sampler_method ddim     --omega 1.6     --conditional --ddim_skip_step 20

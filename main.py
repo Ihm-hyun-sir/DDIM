@@ -161,12 +161,12 @@ def evaluate(sampler, model,save=True,use_eval=True,save_intermediate=False):
         torch.tensor(images[:256]),
         os.path.join(FLAGS.logdir, 'samples_ema_{}.png'.format(FLAGS.specific_class)),
         nrow=16)
-    np.save(os.path.join(FLAGS.logdir, '{}_{}_{}_samples_ema_{}.npy'.format(
-                                    FLAGS.sampler_method, FLAGS.omega, FLAGS.num_images,
+    np.save(os.path.join(FLAGS.logdir, 'sampels_{}_{}steps_omega{}_{}images_{}.npy'.format(
+                                    FLAGS.sampler_method,int(FLAGS.T/FLAGS.ddim_skip_step), FLAGS.omega, FLAGS.num_images,
                                     FLAGS.specific_class)), images)
     if FLAGS.conditional:
-        np.save(os.path.join(FLAGS.logdir, '{}_{}_{}_labels_ema_{}.npy'.format(
-                                FLAGS.sampler_method, FLAGS.omega, FLAGS.num_images,
+        np.save(os.path.join(FLAGS.logdir, 'labels_{}_{}steps_omega{}_{}images_{}.npy'.format(
+                                FLAGS.sampler_method,int(FLAGS.T/FLAGS.ddim_skip_step), FLAGS.omega, FLAGS.num_images,
                                 FLAGS.specific_class)), labels)
 
     (IS, IS_std), FID, prd_score, im_prd = get_inception_and_fid_score(
@@ -433,6 +433,13 @@ def eval():
     (IS, IS_std), FID, prd_score, im_prd, samples, labels = evaluate(sampler, None)
     print("Model(EMA): IS:%6.3f(%.3f), FID:%7.3f, PRD:%7.3f , PRECISION : %7.3f, RECALL : %7.3f" % (IS, IS_std, FID, prd_score[0], im_prd[0] , im_prd[1]))
 
+    with open(os.path.join(FLAGS.logdir,  'results_{}_{}steps_omega{}_{}images_{}.txt'.format(FLAGS.sampler_method,int(FLAGS.T/FLAGS.ddim_skip_step),FLAGS.omega,FLAGS.num_images,FLAGS.specific_class)), 'a+') as f:
+        f.write("Settings: NUM:{} EPOCH:{}, OMEGA:{}, METHOD:{} \n" .format (FLAGS.num_images, FLAGS.ckpt_step, FLAGS.omega,FLAGS.sample_method))
+        f.write("Model(EMA): IS:%6.5f(%.5f), FID/CIFAR100:%7.5f \n" % (IS, IS_std, FID))
+        f.write("Improved PRD:%6.5f, RECALL:%7.5f \n" % (im_prd[0], im_prd[1]))
+        f.write("PRD PRECISION FOR 100 CLASSES:%6.5f, RECALL:%7.5f \n" % (prd_score[0], prd_score[1]))
+    f.close()
+
 
 def set_annealed_lr(opt, base_lr, frac_done):
     lr = base_lr * (1 - frac_done)
@@ -447,7 +454,8 @@ def set_annealed_lr(opt, base_lr, frac_done):
 
 def main(argv):
 
-    # suppress annoying inception_v3 initialization warning
+    # suppress annoying inception_v3 initialization 
+    print(f"Sample with {FLAGS.sampler_method} sampler with {int(FLAGS.T/FLAGS.ddim_skip_step)} steps")
     warnings.simplefilter(action='ignore', category=FutureWarning)
     if FLAGS.train:
         train()
